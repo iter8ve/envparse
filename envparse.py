@@ -9,6 +9,9 @@ import os
 import re
 import shlex
 import warnings
+
+from collections import OrderedDict
+
 try:
     import urllib.parse as urlparse
 except ImportError:
@@ -54,7 +57,10 @@ class Env(object):
     BOOLEAN_TRUE_STRINGS = ('true', 'on', 'ok', 'y', 'yes', '1')
 
     def __init__(self, **schema):
+        self.read_environ = schema.pop('read_environ', False)
+        self.write_environ = schema.pop('write_environ', False)
         self.schema = schema
+        self._storage = OrderedDict()
 
     def __call__(self, var, default=NOTSET, cast=None, subcast=None,
                  force=False, preprocessor=None, postprocessor=None):
@@ -91,14 +97,22 @@ class Env(object):
         # implicitly strings so reduces having to specify.
         cast = str if cast is None else cast
 
+        if self.read_environ:
+            storage = os.environ
+            error_msg_tmpl = "Environment variable '{}' not set."
+        else:
+            storage = self._storage
+            error_msg_tmpl = "Variable '{}' not found in storage."
+
         try:
-            value = os.environ[var]
+            value = storage[var]
         except KeyError:
             if default is NOTSET:
-                error_msg = "Environment variable '{}' not set.".format(var)
+                error_msg = error_msg_tmpl.format(var)
                 raise ConfigurationError(error_msg)
             else:
-                value = default
+                return default
+
 
         # Resolve any proxied values
         if hasattr(value, 'startswith') and value.startswith('{{'):
@@ -163,10 +177,9 @@ class Env(object):
     json = shortcut(pyjson.loads)
     url = shortcut(urlparse.urlparse)
 
-    @staticmethod
-    def read_envfile(path=None, _overwrite=False, **overrides):
+    def read_envfile(self, path=None, _overwrite=False, **overrides):
         """
-        Read a .env file (line delimited KEY=VALUE) into os.environ.
+        Read a .env file (line delimited KEY=VALUE) into os.environ or internal storage.
 
         If _overwrite is True, then existing environment variables will be overwritten by the
         values within the file.
@@ -182,11 +195,16 @@ class Env(object):
             caller_dir = os.path.dirname(frame.f_code.co_filename)
             path = os.path.join(os.path.abspath(caller_dir), '.env')
 
+        # Determine storage
+        storage = os.environ if self.read_environ else self._storage
+
         # Determine function to use for updating environment variables
         if _overwrite:
-            set_env_var = os.environ.__setitem__
+            set_var = storage.__setitem__
         else:
-            set_env_var = os.environ.setdefault
+            set_var = storage.setdefault
+
+        # print(f'path is {path}; _overwrite is {_overwrite}')
 
         try:
             with open(path, 'r') as f:
@@ -201,11 +219,12 @@ class Env(object):
                 Env.read_envfile(path, **overrides)
             else:
                 # Reached top level directory.
-                warnings.warn('Could not any envfile.')
+                warnings.warn('Could not find any envfile.')
             return
 
-        logger.debug('Reading environment variables from: %s', path)
+        logger.debug('Reading variables from: %s', path)
         for line in content.splitlines():
+            # print(line)
             tokens = list(shlex.shlex(line, posix=True))
             # parses the assignment statement
             if len(tokens) < 3:
@@ -217,10 +236,10 @@ class Env(object):
             if not re.match(r'[A-Za-z_][A-Za-z_0-9]*', name):
                 continue
             value = value.replace(r'\n', '\n').replace(r'\t', '\t')
-            set_env_var(name, value)
+            set_var(name, value)
 
         for name, value in overrides.items():
-            set_env_var(name, value)
+            set_var(name, value)
 
 
 # Convenience object if no schema is required.
